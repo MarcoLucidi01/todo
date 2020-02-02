@@ -10,54 +10,20 @@ import (
 	"strings"
 )
 
-const FILENAME string = ".todo" // stored in user's home directory
-
 const (
+	FILENAME         string = ".todo" // stored in user's home directory
 	COMPLETEPREFIX   string = "[x] "
 	INCOMPLETEPREFIX string = "[ ] "
 )
 
-type Action int // an operation that can be performed on the list
-const (
-	ADD             Action = iota // desc...
-	EDIT                          // -e id desc...
-	MARKCOMPLETE                  // -c id...
-	MARKINCOMPLETE                // -i id...
-	PRINTALL                      // -c
-	PRINTINCOMPLETE               // default action
-	REMOVE                        // -r id...
-	REMOVECOMPLETE                // -r
-	REPLACE                       // -e id /sub/rep/
-	SWAP                          // -s id id
-)
+type TodoList []Todo
 
-type Args struct { // arguments from command line
-	action   Action // action to be performed
-	ids      []int  // parsed ids
-	desc     string // new todo description
-	sub, rep string // substring and replacement for REPLACE action
-}
-
-type Todo struct { // todo list item
+type Todo struct {
 	desc     string // todo description
 	complete bool   // whether the todo was completed or not
 }
 
-var args Args   // parsed arguments
-var list []Todo // in memory todo list
-
 func main() {
-	parseArgs()
-	loadList()
-	checkIds()
-	doAction()
-	if args.action != PRINTALL && args.action != PRINTINCOMPLETE {
-		printIncomplete()
-		saveList()
-	}
-}
-
-func parseArgs() {
 	flag.Usage = printUsage
 	c := flag.Bool("c", false, "")
 	i := flag.Bool("i", false, "")
@@ -66,49 +32,51 @@ func parseArgs() {
 	r := flag.Bool("r", false, "")
 	flag.Parse()
 
+	list := loadList()
+	maxId := len(*list) - 1
+
+	if flag.NFlag() == 0 && flag.NArg() == 0 {
+		list.printIncomplete() // default when no args
+		return
+	}
+	if *c && flag.NArg() == 0 {
+		list.printAll() // -c
+		return
+	}
+
 	if *c {
-		if flag.Arg(0) == "" {
-			args.action = PRINTALL
-		} else {
-			args.action = MARKCOMPLETE
-			args.ids = parseIds(flag.Args(), -1)
-		}
+		list.markComplete(parseIds(flag.Args(), maxId, -1)) // -c id...
 
 	} else if *i {
-		args.action = MARKINCOMPLETE
-		args.ids = parseIds(flag.Args(), -1)
+		list.markIncomplete(parseIds(flag.Args(), maxId, -1)) // -i id...
 
 	} else if *e {
-		args.action = EDIT
-		args.ids = parseIds(flag.Args(), 1)
-		args.desc = parseDesc(flag.Args()[1:])
-
-		split := strings.Split(args.desc, "/")
-		if len(split) == 4 && split[0] == "" && split[3] == "" { // /sub/rep/
-			args.action = REPLACE
-			args.sub = split[1]
-			args.rep = split[2]
+		id := parseIds(flag.Args(), maxId, 1)[0]
+		desc := parseDesc(flag.Args()[1:])
+		split := strings.Split(desc, "/")
+		if len(split) == 4 && split[0] == "" && split[3] == "" {
+			list.replace(id, split[1], split[2]) // -e id /sub/rep/
+		} else {
+			list.edit(id, desc) // -e id desc...
 		}
 
 	} else if *s {
-		args.action = SWAP
-		args.ids = parseIds(flag.Args(), 2)
+		ids := parseIds(flag.Args(), maxId, 2)
+		list.swap(ids[0], ids[1]) // -s id id
 
 	} else if *r {
-		if flag.Arg(0) == "" {
-			args.action = REMOVECOMPLETE
+		if flag.NArg() == 0 {
+			list.removeComplete() // -r
 		} else {
-			args.action = REMOVE
-			args.ids = parseIds(flag.Args(), -1)
+			list.remove(parseIds(flag.Args(), maxId, -1)) // -r id...
 		}
 
-	} else if flag.Arg(0) == "" {
-		args.action = PRINTINCOMPLETE
-
 	} else {
-		args.action = ADD
-		args.desc = parseDesc(flag.Args())
+		list.add(parseDesc(flag.Args())) // desc...
 	}
+
+	list.printIncomplete()
+	list.save()
 }
 
 func printUsage() {
@@ -128,10 +96,10 @@ todos are stored at %v
   -h               show usage message
 
 repo: https://github.com/MarcoLucidi01/todo
-`, os.Args[0], filepath())
+`, os.Args[0], buildFilepath())
 }
 
-func filepath() string {
+func buildFilepath() string {
 	usr, err := user.Current()
 	if err != nil {
 		die("unable to get user's home directory")
@@ -139,14 +107,14 @@ func filepath() string {
 	return usr.HomeDir + "/" + FILENAME
 }
 
-func parseIds(ss []string, expected int) []int {
+func parseIds(ss []string, maxId, expected int) []int {
 	var ids []int
 	for i, s := range ss {
 		if expected >= 0 && i == expected {
 			break
 		}
 		id, err := strconv.ParseInt(s, 10, 0)
-		if err != nil {
+		if err != nil || id < 0 || int(id) > maxId {
 			die("invalid id \"%v\"", s)
 		}
 		ids = append(ids, int(id))
@@ -164,13 +132,14 @@ func parseDesc(ss []string) string {
 	return strings.Join(ss, " ")
 }
 
-func loadList() {
-	f, err := os.OpenFile(filepath(), os.O_RDONLY|os.O_CREATE, 0644)
+func loadList() *TodoList {
+	f, err := os.OpenFile(buildFilepath(), os.O_RDONLY|os.O_CREATE, 0644)
 	if err != nil {
 		die(err.Error())
 	}
 	defer f.Close()
 
+	var list TodoList
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		desc := scanner.Text()
@@ -181,66 +150,31 @@ func loadList() {
 		}
 		list = append(list, Todo{desc, complete})
 	}
+	return &list
 }
 
-func checkIds() {
-	max := len(list) - 1
-	for _, id := range args.ids {
-		if id < 0 || id > max {
-			die("invalid id %v", id)
-		}
+func (list *TodoList) add(desc string) {
+	*list = append(*list, Todo{desc, false})
+}
+
+func (list *TodoList) edit(id int, desc string) {
+	(*list)[id].desc = desc
+}
+
+func (list *TodoList) markComplete(ids []int) {
+	for _, id := range ids {
+		(*list)[id].complete = true
 	}
 }
 
-func doAction() {
-	switch args.action {
-	case ADD:
-		add()
-	case EDIT:
-		edit()
-	case MARKCOMPLETE:
-		markComplete()
-	case MARKINCOMPLETE:
-		markIncomplete()
-	case PRINTALL:
-		printAll()
-	case PRINTINCOMPLETE:
-		printIncomplete()
-	case REMOVE:
-		remove()
-	case REMOVECOMPLETE:
-		removeComplete()
-	case REPLACE:
-		replace()
-	case SWAP:
-		swap()
-	default:
-		die("invalid action %v", args.action) // not reached
+func (list *TodoList) markIncomplete(ids []int) {
+	for _, id := range ids {
+		(*list)[id].complete = false
 	}
 }
 
-func add() {
-	list = append(list, Todo{args.desc, false})
-}
-
-func edit() {
-	list[args.ids[0]].desc = args.desc
-}
-
-func markComplete() {
-	for _, id := range args.ids {
-		list[id].complete = true
-	}
-}
-
-func markIncomplete() {
-	for _, id := range args.ids {
-		list[id].complete = false
-	}
-}
-
-func printAll() {
-	for id, todo := range list {
+func (list *TodoList) printAll() {
+	for id, todo := range *list {
 		prefix := INCOMPLETEPREFIX
 		if todo.complete {
 			prefix = COMPLETEPREFIX
@@ -249,17 +183,17 @@ func printAll() {
 	}
 }
 
-func printIncomplete() {
-	for id, todo := range list {
+func (list *TodoList) printIncomplete() {
+	for id, todo := range *list {
 		if !todo.complete {
 			fmt.Printf("%v %v%v\n", id, INCOMPLETEPREFIX, todo.desc)
 		}
 	}
 }
 
-func remove() {
-	removeIf(func(id int, todo Todo) bool {
-		for _, aid := range args.ids {
+func (list *TodoList) remove(ids []int) {
+	list.removeIf(func(id int, todo Todo) bool {
+		for _, aid := range ids {
 			if id == aid {
 				return todo.complete || askYesNo("todo %v is incomplete. Remove it?", id)
 			}
@@ -268,22 +202,23 @@ func remove() {
 	})
 }
 
-func removeComplete() {
+func (list *TodoList) removeComplete() {
 	if askYesNo("remove all completed todos?") {
-		removeIf(func(id int, todo Todo) bool {
+		list.removeIf(func(id int, todo Todo) bool {
 			return todo.complete
 		})
 	}
 }
 
-func removeIf(predicate func(int, Todo) bool) {
-	var newList []Todo
-	for id, todo := range list {
-		if !predicate(id, todo) {
-			newList = append(newList, todo)
+func (list *TodoList) removeIf(predicate func(int, Todo) bool) {
+	newLen := 0
+	for id := 0; id < len(*list); id++ {
+		if !predicate(id, (*list)[id]) {
+			(*list)[newLen] = (*list)[id]
+			newLen++
 		}
 	}
-	list = newList
+	*list = (*list)[:newLen]
 }
 
 func askYesNo(question string, a ...interface{}) bool {
@@ -294,27 +229,25 @@ func askYesNo(question string, a ...interface{}) bool {
 	return err == nil && (strings.EqualFold(ans, "y") || strings.EqualFold(ans, "yes"))
 }
 
-func replace() {
-	id := args.ids[0]
-	list[id].desc = strings.Replace(list[id].desc, args.sub, args.rep, -1)
+func (list *TodoList) replace(id int, sub, rep string) {
+	(*list)[id].desc = strings.Replace((*list)[id].desc, sub, rep, -1)
 }
 
-func swap() {
-	id1, id2 := args.ids[0], args.ids[1]
-	tmp := list[id1]
-	list[id1] = list[id2]
-	list[id2] = tmp
+func (list *TodoList) swap(id1 int, id2 int) {
+	tmp := (*list)[id1]
+	(*list)[id1] = (*list)[id2]
+	(*list)[id2] = tmp
 }
 
-func saveList() {
-	f, err := os.Create(filepath())
+func (list *TodoList) save() {
+	f, err := os.Create(buildFilepath())
 	if err != nil {
 		die(err.Error())
 	}
 	defer f.Close()
 
 	w := bufio.NewWriter(f)
-	for _, todo := range list {
+	for _, todo := range *list {
 		if todo.complete {
 			w.WriteString(COMPLETEPREFIX)
 		} else {
