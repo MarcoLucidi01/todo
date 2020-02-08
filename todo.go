@@ -179,14 +179,14 @@ func (list *TodoList) printAll() {
 		if todo.complete {
 			prefix = COMPLETEPREFIX
 		}
-		fmt.Printf("%v %v%v\n", id, prefix, todo.desc)
+		fmt.Printf("%2v %v%v\n", id, prefix, todo.desc)
 	}
 }
 
 func (list *TodoList) printIncomplete() {
 	for id, todo := range *list {
 		if !todo.complete {
-			fmt.Printf("%v %v%v\n", id, INCOMPLETEPREFIX, todo.desc)
+			fmt.Printf("%2v %v%v\n", id, INCOMPLETEPREFIX, todo.desc)
 		}
 	}
 }
